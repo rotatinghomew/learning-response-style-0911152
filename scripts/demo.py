@@ -44,6 +44,18 @@ def main():
             loaded = call("http://127.0.0.1:8766/analyses/" + record["id"])
             if loaded != record:
                 raise RuntimeError("保存的分析与返回值不一致")
+
+            style = call("http://127.0.0.1:8766/analyses", {
+                "request_key": "local-response-style", "release": "term-a",
+                "analysis": "response_style",
+                "parameters": {"bootstrap": 60, "permutations": 60, "folds": 3},
+            })
+            summary = {trait: {"verdict": block["verdict"],
+                               "failed_constraints": block["failed_constraints"]}
+                       for trait, block in style["result"]["conclusions"].items()}
+            print(json.dumps({"response_style": summary}, ensure_ascii=False, indent=2))
+            if call("http://127.0.0.1:8766/analyses/" + style["id"]) != style:
+                raise RuntimeError("保存的作答方式分析与返回值不一致")
             print(f"本地分析完成，用时 {time.monotonic() - started:.2f} 秒")
         finally:
             for process in processes:

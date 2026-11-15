@@ -4,6 +4,7 @@ import math
 import numpy as np
 
 from learning.codec import numeric, require_fields, unique
+from learning.response_style import response_style_analysis
 
 PRODUCT = '学习体验追踪'
 KEYS = {'people': ['person'], 'items': ['item'], 'answers': ['person', 'wave', 'item'], 'vignettes': ['vignette'], 'vignette_answers': ['person', 'wave', 'vignette']}
@@ -37,4 +38,4 @@ def overview(tables, parameters):
                               for key, value in sorted(counts.items())], "people": len(tables["people"])}
 
 
-ANALYSES = {"overview": overview}
+ANALYSES = {"overview": overview, "response_style": response_style_analysis}

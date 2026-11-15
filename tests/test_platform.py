@@ -128,3 +128,105 @@ class PlatformTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResponseStylePlatformTests(unittest.TestCase):
+    """接入服务后的行为：目录登记、幂等、持久化，以及旧分析继续可用。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.source = source_server("127.0.0.1", 0, "data/releases.json")
+        cls.source_url = f"http://127.0.0.1:{cls.source.server_port}"
+        cls.application = analysis_server("127.0.0.1", 0, cls.source_url,
+                                          Path(cls.temporary.name) / "style.sqlite3")
+        cls.base_url = f"http://127.0.0.1:{cls.application.server_port}"
+        cls.threads = []
+        for server in (cls.source, cls.application):
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            cls.threads.append(thread)
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in (cls.application, cls.source):
+            server.shutdown()
+            server.server_close()
+        for thread in cls.threads:
+            thread.join()
+        cls.temporary.cleanup()
+
+    def request(self, path, value=None):
+        request = Request(self.base_url + path,
+                          data=json.dumps(value).encode() if value is not None else None,
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=60) as response:
+            return response.status, json.load(response)
+
+    def test_catalog_lists_response_style(self):
+        status, catalog = self.request("/catalog")
+        self.assertEqual(status, 200)
+        self.assertIn("overview", catalog["analyses"])
+        self.assertIn("response_style", catalog["analyses"])
+
+    def test_response_style_saved_and_retrievable(self):
+        request = {
+            "request_key": "style-a", "release": "term-a", "analysis": "response_style",
+            "parameters": {"bootstrap": 60, "permutations": 60, "folds": 3},
+        }
+        status, record = self.request("/analyses", request)
+        self.assertEqual(status, 201)
+        self.assertEqual(record["result"]["version"], "response_style/1")
+        self.assertEqual(record, self.request("/analyses/" + record["id"])[1])
+        self.assertEqual(record, self.request("/analyses", request)[1])
+
+    def test_overview_still_available_after_style_reuse(self):
+        self.request("/analyses", {
+            "request_key": "style-b", "release": "term-a", "analysis": "response_style",
+            "parameters": {"bootstrap": 60, "permutations": 60, "folds": 3},
+        })
+        status, record = self.request("/analyses", {
+            "request_key": "overview-b", "release": "term-a", "analysis": "overview",
+        })
+        self.assertEqual(status, 201)
+        self.assertIn("distributions", record["result"])
+
+    def test_style_history_survives_restart(self):
+        request = {
+            "request_key": "style-restart", "release": "term-a",
+            "analysis": "response_style",
+            "parameters": {"bootstrap": 60, "permutations": 60, "folds": 3},
+        }
+        record = self.request("/analyses", request)[1]
+        reopened = Store(Path(self.temporary.name) / "style.sqlite3")
+        self.assertEqual(record, reopened.get(record["id"]))
+
+    def test_invalid_style_parameters_rejected(self):
+        with self.assertRaises(HTTPError) as raised:
+            self.request("/analyses", {
+                "request_key": "style-bad", "release": "term-a",
+                "analysis": "response_style", "parameters": {"group_by": ["person"]},
+            })
+        self.assertEqual(raised.exception.code, 422)
+
+    def test_release_change_conflicts_for_style(self):
+        request = {
+            "request_key": "style-conflict", "release": "term-a",
+            "analysis": "response_style",
+            "parameters": {"bootstrap": 60, "permutations": 60, "folds": 3},
+        }
+        self.request("/analyses", request)
+        with self.assertRaises(HTTPError) as raised:
+            self.request("/analyses", {**request, "release": "term-b"})
+        self.assertEqual(raised.exception.code, 409)
+
+    def test_limited_release_reports_insufficient(self):
+        status, record = self.request("/analyses", {
+            "request_key": "style-limited", "release": "limited",
+            "analysis": "response_style",
+            "parameters": {"bootstrap": 60, "permutations": 60, "folds": 3},
+        })
+        self.assertEqual(status, 201)
+        for trait, conclusion in record["result"]["conclusions"].items():
+            with self.subTest(trait=trait):
+                self.assertEqual(conclusion["verdict"], "not_supported")
